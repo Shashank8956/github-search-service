@@ -20,6 +20,10 @@ const (
 	// GitHub's maximum page size for code search.
 	perPage = 100
 
+	// Code search never returns more than 1000 results, so asking past page 10
+	// is wasted budget.
+	maxPages = 10
+
 	maxErrorBody = 4 << 10
 )
 
@@ -79,11 +83,21 @@ func (c *Client) Search(ctx context.Context, q Query) ([]Result, error) {
 		return nil, err
 	}
 
-	page, err := c.searchPage(ctx, term, 1)
-	if err != nil {
-		return nil, err
+	// Pages go one at a time: a full 1000 results is 10 requests, which is the
+	// entire per-minute budget, so fetching them concurrently buys nothing.
+	var all []Result
+	for page := 1; page <= maxPages; page++ {
+		body, err := c.searchPage(ctx, term, page)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, body.results()...)
+
+		if len(body.Items) < perPage || len(all) >= body.TotalCount {
+			break
+		}
 	}
-	return page.results(), nil
+	return all, nil
 }
 
 func buildQuery(q Query) (string, error) {

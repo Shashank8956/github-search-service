@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -23,6 +24,18 @@ const twoHitsJSON = `{
     }
   ]
 }`
+
+// pageJSON builds a response with n items, numbered from start.
+func pageJSON(total, n, start int) string {
+	items := make([]string, n)
+	for i := range items {
+		items[i] = fmt.Sprintf(
+			`{"html_url":"https://github.com/octocat/hello/blob/main/f%d.go","repository":{"full_name":"octocat/hello"}}`,
+			start+i,
+		)
+	}
+	return fmt.Sprintf(`{"total_count":%d,"items":[%s]}`, total, strings.Join(items, ","))
+}
 
 func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
 	t.Helper()
@@ -142,6 +155,47 @@ func TestSearchRequest(t *testing.T) {
 	}
 	if accept := got.Header.Get("Accept"); accept != "application/vnd.github+json" {
 		t.Errorf("Accept = %q, want application/vnd.github+json", accept)
+	}
+}
+
+func TestSearchPaginates(t *testing.T) {
+	var pages []string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		if page == "1" {
+			w.Write([]byte(pageJSON(150, perPage, 0)))
+			return
+		}
+		w.Write([]byte(pageJSON(150, 50, 100)))
+	})
+
+	got, err := c.Search(context.Background(), Query{Term: "x"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	if len(got) != 150 {
+		t.Errorf("got %d results, want 150", len(got))
+	}
+	if want := []string{"1", "2"}; !reflect.DeepEqual(pages, want) {
+		t.Errorf("fetched pages %v, want %v", pages, want)
+	}
+}
+
+func TestSearchStopsAtLastPage(t *testing.T) {
+	var calls int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		// Always a full page, so only the 1000 result ceiling ends the loop.
+		w.Write([]byte(pageJSON(5000, perPage, 0)))
+	})
+
+	if _, err := c.Search(context.Background(), Query{Term: "x"}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if calls != maxPages {
+		t.Errorf("made %d requests, want %d", calls, maxPages)
 	}
 }
 
