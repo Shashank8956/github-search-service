@@ -8,7 +8,10 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 const twoHitsJSON = `{
@@ -229,6 +232,63 @@ func TestSearchMaxResults(t *testing.T) {
 func TestNewRejectsBadMaxResults(t *testing.T) {
 	if _, err := New("test-token", WithMaxResults(0)); err == nil {
 		t.Fatal("New(WithMaxResults(0)) = nil error, want one")
+	}
+}
+
+func TestSearchCoalesces(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		<-release
+		w.Write([]byte(twoHitsJSON))
+	})
+
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.Search(context.Background(), Query{Term: "same"}); err != nil {
+				t.Errorf("Search: %v", err)
+			}
+		}()
+	}
+
+	// Let the callers pile up behind the one that is in flight.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if n := calls.Load(); n != 1 {
+		t.Errorf("made %d API calls, want 1", n)
+	}
+}
+
+func TestSearchCancelOne(t *testing.T) {
+	release := make(chan struct{})
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		w.Write([]byte(twoHitsJSON))
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go c.Search(ctx, Query{Term: "same"})
+	time.Sleep(50 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Search(context.Background(), Query{Term: "same"})
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	// The first caller leaves; the second is still waiting on the same call.
+	cancel()
+	close(release)
+
+	if err := <-done; err != nil {
+		t.Errorf("second caller got %v, want it to still succeed", err)
 	}
 }
 

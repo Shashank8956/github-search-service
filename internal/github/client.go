@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -27,6 +29,9 @@ const (
 	// One page. SearchResponse has no page token, so a caller cannot ask for
 	// the rest and a large default would just burn budget.
 	defaultMaxResults = 100
+
+	// Ten pages paced at ten requests a minute, plus room for slow responses.
+	searchTimeout = 2 * time.Minute
 
 	maxErrorBody = 4 << 10
 )
@@ -49,6 +54,7 @@ type Client struct {
 	token      string
 	limiter    limiter
 	maxResults int
+	group      singleflight.Group
 }
 
 type Option func(*Client)
@@ -98,6 +104,27 @@ func (c *Client) Search(ctx context.Context, q Query) ([]Result, error) {
 		return nil, err
 	}
 
+	// Identical searches already in flight share one trip to GitHub.
+	ch := c.group.DoChan(term, func() (any, error) {
+		// Detached from the caller's context, so whoever happens to arrive
+		// first cannot cancel the call everyone else is waiting on.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), searchTimeout)
+		defer cancel()
+		return c.searchAll(ctx, term)
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.([]Result), nil
+	}
+}
+
+func (c *Client) searchAll(ctx context.Context, term string) ([]Result, error) {
 	// Pages go one at a time: a full 1000 results is 10 requests, which is the
 	// entire per-minute budget, so fetching them concurrently buys nothing.
 	var all []Result
