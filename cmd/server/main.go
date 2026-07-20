@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"flag"
-	"log"
+	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -17,31 +19,45 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		slog.Error("exiting", "err", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	addr := flag.String("addr", ":50051", "address to listen on")
 	flag.Parse()
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
 
 	// From the environment rather than a flag, so it stays out of ps output.
 	token := os.Getenv("GITHUB_TOKEN")
 	if token == "" {
-		log.Fatal("GITHUB_TOKEN is not set")
+		return errors.New("GITHUB_TOKEN is not set")
 	}
 
 	client, err := github.New(token)
 	if err != nil {
-		log.Fatalf("github client: %v", err)
+		return fmt.Errorf("github client: %w", err)
 	}
 
 	svc, err := server.New(client)
 	if err != nil {
-		log.Fatalf("service: %v", err)
+		return fmt.Errorf("service: %w", err)
 	}
 
 	lis, err := net.Listen("tcp", *addr)
 	if err != nil {
-		log.Fatalf("listen on %s: %v", *addr, err)
+		return fmt.Errorf("listen on %s: %w", *addr, err)
 	}
 
-	grpcServer := grpc.NewServer()
+	// Recover sits outermost so it also covers the logging interceptor.
+	grpcServer := grpc.NewServer(grpc.ChainUnaryInterceptor(
+		server.Recover(logger),
+		server.LogRequests(logger),
+	))
 	searchpb.RegisterGithubSearchServiceServer(grpcServer, svc)
 	reflection.Register(grpcServer) // lets grpcurl explore the service
 
@@ -49,12 +65,10 @@ func main() {
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 		<-stop
-		log.Println("shutting down")
+		logger.Info("shutting down")
 		grpcServer.GracefulStop()
 	}()
 
-	log.Printf("listening on %s", *addr)
-	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("serve: %v", err)
-	}
+	logger.Info("listening", "addr", *addr)
+	return grpcServer.Serve(lis)
 }
