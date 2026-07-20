@@ -27,6 +27,7 @@ func main() {
 
 func run() error {
 	addr := flag.String("addr", ":50051", "address to listen on")
+	maxResults := flag.Int("max-results", 100, "most results to return per search")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -38,7 +39,7 @@ func run() error {
 		return errors.New("GITHUB_TOKEN is not set")
 	}
 
-	client, err := github.New(token)
+	client, err := github.New(token, github.WithMaxResults(*maxResults))
 	if err != nil {
 		return fmt.Errorf("github client: %w", err)
 	}

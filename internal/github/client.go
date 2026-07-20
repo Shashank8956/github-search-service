@@ -24,6 +24,10 @@ const (
 	// is wasted budget.
 	maxPages = 10
 
+	// One page. SearchResponse has no page token, so a caller cannot ask for
+	// the rest and a large default would just burn budget.
+	defaultMaxResults = 100
+
 	maxErrorBody = 4 << 10
 )
 
@@ -40,10 +44,11 @@ type Query struct {
 }
 
 type Client struct {
-	httpc   *http.Client
-	baseURL string
-	token   string
-	limiter limiter
+	httpc      *http.Client
+	baseURL    string
+	token      string
+	limiter    limiter
+	maxResults int
 }
 
 type Option func(*Client)
@@ -57,6 +62,11 @@ func WithBaseURL(raw string) Option {
 	return func(c *Client) { c.baseURL = strings.TrimSuffix(raw, "/") }
 }
 
+// WithMaxResults caps how many hits one search returns.
+func WithMaxResults(n int) Option {
+	return func(c *Client) { c.maxResults = n }
+}
+
 // New returns a client. The token is required because code search rejects
 // unauthenticated requests.
 func New(token string, opts ...Option) (*Client, error) {
@@ -65,13 +75,18 @@ func New(token string, opts ...Option) (*Client, error) {
 	}
 
 	c := &Client{
-		httpc:   &http.Client{Timeout: 30 * time.Second},
-		baseURL: defaultBaseURL,
-		token:   token,
-		limiter: newRateLimiter(defaultRateLimit),
+		httpc:      &http.Client{Timeout: 30 * time.Second},
+		baseURL:    defaultBaseURL,
+		token:      token,
+		limiter:    newRateLimiter(defaultRateLimit),
+		maxResults: defaultMaxResults,
 	}
 	for _, opt := range opts {
 		opt(c)
+	}
+
+	if c.maxResults < 1 {
+		return nil, fmt.Errorf("github: max results must be positive, got %d", c.maxResults)
 	}
 	return c, nil
 }
@@ -93,6 +108,10 @@ func (c *Client) Search(ctx context.Context, q Query) ([]Result, error) {
 		}
 		all = append(all, body.results()...)
 
+		if len(all) >= c.maxResults {
+			all = all[:c.maxResults]
+			break
+		}
 		if len(body.Items) < perPage || len(all) >= body.TotalCount {
 			break
 		}

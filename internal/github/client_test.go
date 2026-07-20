@@ -43,7 +43,12 @@ func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 
-	c, err := New("test-token", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	// Capping has its own tests, so the default does not cut these short.
+	c, err := New("test-token",
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithMaxResults(maxPages*perPage),
+	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -196,6 +201,34 @@ func TestSearchStopsAtLastPage(t *testing.T) {
 	}
 	if calls != maxPages {
 		t.Errorf("made %d requests, want %d", calls, maxPages)
+	}
+}
+
+func TestSearchMaxResults(t *testing.T) {
+	var calls int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Write([]byte(pageJSON(5000, perPage, 0)))
+	})
+	c.maxResults = 150
+
+	got, err := c.Search(context.Background(), Query{Term: "x"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+
+	if len(got) != 150 {
+		t.Errorf("got %d results, want 150", len(got))
+	}
+	// Stops as soon as the cap is met instead of walking all ten pages.
+	if calls != 2 {
+		t.Errorf("made %d requests, want 2", calls)
+	}
+}
+
+func TestNewRejectsBadMaxResults(t *testing.T) {
+	if _, err := New("test-token", WithMaxResults(0)); err == nil {
+		t.Fatal("New(WithMaxResults(0)) = nil error, want one")
 	}
 }
 
