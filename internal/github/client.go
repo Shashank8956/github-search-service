@@ -39,6 +39,7 @@ type Client struct {
 	httpc   *http.Client
 	baseURL string
 	token   string
+	limiter limiter
 }
 
 type Option func(*Client)
@@ -63,6 +64,7 @@ func New(token string, opts ...Option) (*Client, error) {
 		httpc:   &http.Client{Timeout: 30 * time.Second},
 		baseURL: defaultBaseURL,
 		token:   token,
+		limiter: newRateLimiter(defaultRateLimit),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -133,11 +135,18 @@ func (c *Client) searchPage(ctx context.Context, term string, page int) (*search
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", apiVersion)
 
+	// Wait for budget before spending it.
+	if err := c.limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("github: waiting for rate limit: %w", err)
+	}
+
 	resp, err := c.httpc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("github: search page %d: %w", page, err)
 	}
 	defer resp.Body.Close()
+
+	c.limiter.Observe(resp.Header)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, statusError(resp)
@@ -153,6 +162,10 @@ func (c *Client) searchPage(ctx context.Context, term string, page int) (*search
 // statusError maps a non-200 onto our error values, never including the token.
 func statusError(resp *http.Response) error {
 	msg := readErrorMessage(resp.Body)
+
+	if isRateLimited(resp) {
+		return &RateLimitError{Reset: resetTime(resp.Header), Message: msg}
+	}
 
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:

@@ -34,6 +34,8 @@ func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// Pacing has its own tests, so nothing here sleeps on a real clock.
+	c.limiter = noopLimiter{}
 	return c
 }
 
