@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package githubsearch.v1;
+
+option go_package = "github.com/shashank8956/github-search-service/proto/searchpb;searchpb";
+
+// GithubSearchService searches GitHub for a phrase and reports where it was found.
+service GithubSearchService {
+  rpc Search(SearchRequest) returns (SearchResponse);
+}
+
+message SearchRequest {
+  string search_term = 1;
+
+  // user is optional and maps to GitHub's "user:" search qualifier, i.e. it
+  // scopes results to repos owned by that account. It does not identify the
+  // caller.
+  string user = 2;
+}
+
+message SearchResponse {
+  repeated Result results = 1;
+}
+
+message Result {
+  string file_url = 1;
+  string repo = 2;
+}
